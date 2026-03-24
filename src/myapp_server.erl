@@ -44,13 +44,12 @@ code_change(_OldVsn, _State, _Extra) ->
 
 request(#state{host = Host, client = httpc}) ->
     Id = base64:encode(crypto:strong_rand_bytes(50)),
-    Result = httpc:request(post, {Host, [{"X-Request-Id", Id}], "application/x-www-form-urlencoded", ?body}, [{ssl, [{verify, verify_none}]}], []),
+    Req = {post, Host, [{"X-Request-Id", Id}], "application/x-www-form-urlencoded", ?body},
+    Result = httpc_queue:request(Req, 30000),
     case Result of
-
         {ok, {{_, _Status, _}, _, _Response}} ->
-            % io:format("request ok ~p~n", [_Status]),
             ok;
-        Error   ->
+        Error ->
             io:format("request error: ~p ~p~n", [Id, Error]),
             {error, Error}
     end;
