@@ -1,7 +1,8 @@
 -module(myapp_server).
 -behavior(gen_server).
+
 -include("data.hrl").
--export([    
+-export([
     init/1,
     handle_call/3,
     handle_cast/2,
@@ -10,13 +11,13 @@
     terminate/2
 ]).
 
--record(state, {host, counter, client}).
+-record(state, {id, host, counter, client}).
 
 init([I, Host, Counter, Client]) ->
     process_flag(trap_exit, true),
     self() ! request,
     io:format("server ~p started~n", [I]),
-    {ok, #state{host = Host, counter = Counter, client = Client}}.
+    {ok, #state{id = I, host = Host, counter = Counter, client = Client}}.
 
 handle_call(_Name, _From, State) ->
     {reply, ok, State}.
@@ -40,11 +41,13 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, _State, _Extra) ->
     {error, ok}.
 
-
-
-request(#state{host = Host, client = httpc}) ->
+request(#state{id = I, host = Host, client = httpc}) ->
     Id = base64:encode(crypto:strong_rand_bytes(50)),
-    Result = httpc:request(post, {Host, [{"X-Request-Id", Id}], "application/x-www-form-urlencoded", ?body}, [{ssl, [{verify, verify_none}]}], []),
+    Result = httpc_profile_queue:request(
+        I,
+        {post, Host, [{"X-Request-Id", Id}], "application/x-www-form-urlencoded", ?body},
+        30000
+    ),
     case Result of
 
         {ok, {{_, _Status, _}, _, _Response}} ->
