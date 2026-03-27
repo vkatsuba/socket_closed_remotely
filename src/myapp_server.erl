@@ -1,6 +1,7 @@
 -module(myapp_server).
 -behavior(gen_server).
 -include("data.hrl").
+-include("request_body_profiles.hrl").
 -export([
     init/1,
     handle_call/3,
@@ -10,13 +11,19 @@
     terminate/2
 ]).
 
--record(state, {host, client}).
+-record(state, {host, client, request_body_profile, request_body}).
 
-init([I, Host, Client]) ->
+init([I, Host, Client, RequestBodyProfile]) ->
     process_flag(trap_exit, true),
     self() ! request,
     io:format("server ~p started~n", [I]),
-    {ok, #state{host = Host, client = Client}}.
+    RequestBody = request_body(RequestBodyProfile),
+    {ok, #state{
+        host = Host,
+        client = Client,
+        request_body_profile = RequestBodyProfile,
+        request_body = RequestBody
+    }}.
 
 handle_call(_Name, _From, State) ->
     {reply, ok, State}.
@@ -41,16 +48,19 @@ code_change(_OldVsn, _State, _Extra) ->
 
 
 
-request(#state{host = Host, client = httpc}) ->
+request(#state{host = Host, client = httpc, request_body_profile = RequestBodyProfile, request_body = RequestBody}) ->
     Id = base64:encode(crypto:strong_rand_bytes(50)),
     StartTimeNative = erlang:monotonic_time(),
-    Result = httpc:request(post, {Host, [{"X-Request-Id", Id}], "application/x-www-form-urlencoded", ?body},
+    RequestBodyBytes = iolist_size(RequestBody),
+    Result = httpc:request(post, {Host, [{"X-Request-Id", Id}], "application/x-www-form-urlencoded", RequestBody},
                            [{ssl, [{verify, verify_none}]}], [{body_format, binary}]),
     case Result of
 
         {ok, {{_, StatusCode, _}, Headers, ResponseBody}} ->
             #{client => httpc,
               request_identifier => Id,
+              request_body_profile => RequestBodyProfile,
+              request_body_bytes => RequestBodyBytes,
               elapsed_time_milliseconds => elapsed_time_milliseconds(StartTimeNative),
               status_code => StatusCode,
               response_header_count => length(Headers),
@@ -60,6 +70,8 @@ request(#state{host = Host, client = httpc}) ->
             io:format("request error: ~p ~p~n", [Id, Error]),
             #{client => httpc,
               request_identifier => Id,
+              request_body_profile => RequestBodyProfile,
+              request_body_bytes => RequestBodyBytes,
               elapsed_time_milliseconds => elapsed_time_milliseconds(StartTimeNative),
               error_type => classify_httpc_error(Error),
               outcome => error,
@@ -67,10 +79,11 @@ request(#state{host = Host, client = httpc}) ->
     end;
 
 
-request(#state{host = Host, client = hackney}) ->
+request(#state{host = Host, client = hackney, request_body_profile = RequestBodyProfile, request_body = RequestBody}) ->
     Id = base64:encode(crypto:strong_rand_bytes(50)),
     StartTimeNative = erlang:monotonic_time(),
-    Result = hackney:request(post, Host, [{"X-Request-Id", Id}], ?body, [{ssl_options, [{verify, verify_none}]}, {connect_timeout, 5000}]),
+    RequestBodyBytes = iolist_size(RequestBody),
+    Result = hackney:request(post, Host, [{"X-Request-Id", Id}], RequestBody, [{ssl_options, [{verify, verify_none}]}, {connect_timeout, 5000}]),
     case Result of
 
         {ok, StatusCode, ResponseHeaders, ClientRef} ->
@@ -78,6 +91,8 @@ request(#state{host = Host, client = hackney}) ->
                 {ok, ResponseBody} ->
                     #{client => hackney,
                       request_identifier => Id,
+                      request_body_profile => RequestBodyProfile,
+                      request_body_bytes => RequestBodyBytes,
                       elapsed_time_milliseconds => elapsed_time_milliseconds(StartTimeNative),
                       status_code => StatusCode,
                       response_header_count => length(ResponseHeaders),
@@ -87,6 +102,8 @@ request(#state{host = Host, client = hackney}) ->
                     io:format("hackney body error: ~p ~p~n", [Id, Error]),
                     #{client => hackney,
                       request_identifier => Id,
+                      request_body_profile => RequestBodyProfile,
+                      request_body_bytes => RequestBodyBytes,
                       elapsed_time_milliseconds => elapsed_time_milliseconds(StartTimeNative),
                       error_type => classify_hackney_error(Error),
                       outcome => error,
@@ -96,11 +113,22 @@ request(#state{host = Host, client = hackney}) ->
             io:format("request error: ~p ~p~n", [Id, Error]),
             #{client => hackney,
               request_identifier => Id,
+              request_body_profile => RequestBodyProfile,
+              request_body_bytes => RequestBodyBytes,
               elapsed_time_milliseconds => elapsed_time_milliseconds(StartTimeNative),
               error_type => classify_hackney_error(Error),
               outcome => error,
               raw_error => Error}
     end.
+
+request_body(large) ->
+    ?large_request_body;
+request_body(medium) ->
+    ?medium_request_body;
+request_body(small) ->
+    ?small_request_body;
+request_body(RequestBodyProfile) ->
+    error({unknown_request_body_profile, RequestBodyProfile}).
 
 elapsed_time_milliseconds(StartTimeNative) ->
     erlang:convert_time_unit(erlang:monotonic_time() - StartTimeNative, native, millisecond).
