@@ -10,7 +10,7 @@ init(_Args) ->
 
     Client = httpc, % httpc | hackney
     CountParallelRequests = 100,
-    RequestBodyBytes = 262144,
+    RequestBodyBytes = 524288,
     EnableHttpcDebugTrace = true,
     TraceLimit = 1000,
     Host = "https://caddy.localhost",

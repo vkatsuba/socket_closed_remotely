@@ -47,9 +47,28 @@ code_change(_OldVsn, _State, _Extra) ->
 
 
 
+next_chunk_list({[], _ChunkSize}) ->
+    eof;
+next_chunk_list({Body, ChunkSize}) ->
+    Len = erlang:min(length(Body), ChunkSize),
+    {Chunk, Rest} = lists:split(Len, Body),
+    {ok, Chunk, {Rest, ChunkSize}}.
+
 request(#state{host = Host, client = httpc, request_body = RequestBody}) ->
     Id = base64:encode(crypto:strong_rand_bytes(50)),
-    Result = httpc:request(post, {Host, [{"X-Request-Id", Id}], "application/x-www-form-urlencoded", RequestBody}, [{ssl, [{verify, verify_none}]}], []),
+    % Result = httpc:request(post, {Host, [{"X-Request-Id", Id}], "application/x-www-form-urlencoded", RequestBody}, [{ssl, [{verify, verify_none}]}], []),
+    ChunkSize = 64 * 1024,
+    Result = httpc:request(
+        post,
+        {Host,
+         [{"X-Request-Id", Id}],
+         "application/x-www-form-urlencoded",
+         {chunkify, fun next_chunk_list/1, {RequestBody, ChunkSize}}},
+        [
+            {ssl, [{verify, verify_none}]}
+        ],
+        []
+    ),
     case Result of
 
         {ok, {{_, _Status, _}, _, _Response}} ->
