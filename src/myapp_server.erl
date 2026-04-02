@@ -47,11 +47,12 @@ code_change(_OldVsn, _State, _Extra) ->
 
 
 
-next_chunk_list({[], _ChunkSize}) ->
+next_chunk({<<>>, _ChunkSize}) ->
     eof;
-next_chunk_list({Body, ChunkSize}) ->
-    Len = erlang:min(length(Body), ChunkSize),
-    {Chunk, Rest} = lists:split(Len, Body),
+next_chunk({Bin, ChunkSize}) when byte_size(Bin) =< ChunkSize ->
+    {ok, Bin, {<<>>, ChunkSize}};
+next_chunk({Bin, ChunkSize}) ->
+    <<Chunk:ChunkSize/binary, Rest/binary>> = Bin,
     {ok, Chunk, {Rest, ChunkSize}}.
 
 request(#state{host = Host, client = httpc, request_body = RequestBody}) ->
@@ -63,7 +64,7 @@ request(#state{host = Host, client = httpc, request_body = RequestBody}) ->
         {Host,
          [{"X-Request-Id", Id}],
          "application/x-www-form-urlencoded",
-         {chunkify, fun next_chunk_list/1, {RequestBody, ChunkSize}}},
+         {chunkify, fun next_chunk/1, {iolist_to_binary(RequestBody), ChunkSize}}},
         [
             {ssl, [{verify, verify_none}]}
         ],
