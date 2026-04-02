@@ -7,6 +7,7 @@
    [
     kernel,
     stdlib,
+    runtime_tools,
     inets,
     crypto,
     public_key,
