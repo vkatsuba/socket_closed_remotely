@@ -12,7 +12,8 @@
     crypto,
     public_key,
     ssl,
-    hackney
+    hackney,
+    gun
    ]},
   {env,[]},
   {modules, []}
