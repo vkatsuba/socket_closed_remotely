@@ -1,7 +1,8 @@
 -module(myapp_server).
 -behavior(gen_server).
 
--define(GUN_CLOSED_RETRIES, 10).
+-define(KNOWN_RESPONSE_BODY_BYTES, 2000000).
+
 -export([    
     init/1,
     handle_call/3,
@@ -17,7 +18,6 @@
     client,
     request_body_bytes,
     request_body,
-    gun_conn_pid = undefined,
     gun_host = undefined,
     gun_port = undefined,
     gun_path = undefined
@@ -106,9 +106,12 @@ request(State = #state{host = Host, client = hackney, request_body = RequestBody
         {ok, _StatusCode, _RespHeaders, ClientRef} ->
            
             case hackney:body(ClientRef) of
-                {ok, _} -> 
-                        % io:format("request ok ~p~n", [_Status]),
-                        {ok, State};
+                {ok, RespBody} when byte_size(RespBody) =:= ?KNOWN_RESPONSE_BODY_BYTES ->
+                    {ok, State};
+                {ok, RespBody} ->
+                    io:format("hackney body size mismatch: ~p got=~p expected=~p~n",
+                        [Id, byte_size(RespBody), ?KNOWN_RESPONSE_BODY_BYTES]),
+                    {{error, {unexpected_body_size, byte_size(RespBody)}}, State};
                  Error   ->
                     io:format("hackney body error: ~p ~p~n", [Id, Error]),
                     {{error, Error}, State}
@@ -123,116 +126,129 @@ request(State = #state{client = gun, request_body = RequestBody}) ->
     Body = iolist_to_binary(RequestBody),
     Headers = [
         {<<"x-request-id">>, Id},
-        {<<"content-type">>, <<"application/x-www-form-urlencoded">>}
+        {<<"user-agent">>, <<"hackney/1.20.1">>},
+        {<<"content-type">>, <<"application/octet-stream">>}
     ],
-    ok = myapp_gun_limiter:acquire(),
-    try
-        gun_request(State, Id, Headers, Body, ?GUN_CLOSED_RETRIES)
-    after
-        myapp_gun_limiter:release()
-    end.
+    gun_request(State, Id, Headers, Body).
 
-gun_request(State, Id, Headers, Body, RetriesLeft) ->
-    case ensure_gun_connection(State) of
-        {ok, ConnPid, ConnectedState} ->
-            StreamRef = gun:post(ConnPid, ConnectedState#state.gun_path, Headers, Body),
-            case gun_await_response_body(ConnPid, StreamRef) of
-                ok ->
-                    {ok, ConnectedState};
-                Error ->
-                    gun:close(ConnPid),
-                    DisconnectedState = ConnectedState#state{gun_conn_pid = undefined},
-                    case RetriesLeft > 0 andalso should_retry_gun_error(Error) of
-                        true ->
-                            io:format("gun request retry: ~p ~p~n", [Id, Error]),
-                            gun_request(DisconnectedState, Id, Headers, Body, RetriesLeft - 1);
-                        false ->
-                            io:format("gun request error: ~p ~p~n", [Id, Error]),
-                            {{error, Error}, DisconnectedState}
-                    end
+gun_request(State, Id, Headers, Body) ->
+    case open_gun_connection(State) of
+        {ok, ConnPid} ->
+            try
+                StreamRef = gun:post(ConnPid, State#state.gun_path, Headers, Body),
+                case gun_await_response_body(ConnPid, StreamRef) of
+                    ok ->
+                        {ok, State};
+                    Error ->
+                        io:format("gun request error: ~p ~p~n", [Id, Error]),
+                        {{error, Error}, State}
+                end
+            after
+                catch gun:close(ConnPid)
             end;
-        {error, Error, DisconnectedState} ->
+        {error, Error} ->
             io:format("gun connection error: ~p ~p~n", [Id, Error]),
-            {{error, Error}, DisconnectedState}
+            {{error, Error}, State}
     end.
 
 gun_destination(gun, Host) ->
     Parsed = uri_string:parse(Host),
     GunHost = maps:get(host, Parsed),
     GunPort = maps:get(port, Parsed, 443),
-    GunPath =
-        case maps:get(path, Parsed, "/") of
-            [] -> "/";
-            Path -> Path
-        end,
+    GunPath = case maps:get(path, Parsed, "/") of
+        [] -> "/";
+        Path -> Path
+    end,
     {GunHost, GunPort, GunPath};
 gun_destination(_Client, _Host) ->
     {undefined, undefined, undefined}.
 
-ensure_gun_connection(State = #state{gun_conn_pid = ConnPid}) when is_pid(ConnPid) ->
-    case is_process_alive(ConnPid) of
-        true -> {ok, ConnPid, State};
-        false -> ensure_gun_connection(State#state{gun_conn_pid = undefined})
-    end;
-ensure_gun_connection(State = #state{gun_host = GunHost, gun_port = GunPort}) ->
+open_gun_connection(#state{gun_host = GunHost, gun_port = GunPort}) ->
     Opts = #{
         transport => tls,
-        tls_opts => [{verify, verify_none}, {server_name_indication, GunHost}],
+        tls_opts => [
+            {verify, verify_none},
+            {server_name_indication, GunHost}
+        ],
         protocols => [http],
+        http_opts => #{version => 'HTTP/1.0'},
         retry => 0
     },
     case gun:open(GunHost, GunPort, Opts) of
         {ok, ConnPid} ->
             case gun:await_up(ConnPid, 5000) of
                 {ok, _Protocol} ->
-                    {ok, ConnPid, State#state{gun_conn_pid = ConnPid}};
+                    {ok, ConnPid};
                 Error ->
-                    gun:close(ConnPid),
-                    {error, Error, State#state{gun_conn_pid = undefined}}
+                    catch gun:close(ConnPid),
+                    {error, Error}
             end;
         Error ->
-            {error, Error, State#state{gun_conn_pid = undefined}}
+            Error
     end.
 
 gun_await_response_body(ConnPid, StreamRef) ->
     case gun:await(ConnPid, StreamRef, 10000) of
         {response, fin, _Status, _Headers} ->
             ok;
-        {response, nofin, _Status, _Headers} ->
-            case gun:await_body(ConnPid, StreamRef, 10000) of
-                {ok, _Body} -> ok;
-                {ok, _Body, _Trailers} -> ok;
-                Error -> Error
-            end;
+        {response, nofin, _Status, Headers} ->
+            ExpectedBytes = expected_response_bytes(Headers),
+            gun_collect_body(ConnPid, StreamRef, ExpectedBytes, 0);
         Error ->
             Error
     end.
 
-should_retry_gun_error({error, Reason}) ->
-    should_retry_gun_error(Reason);
-should_retry_gun_error({stream_error, closed}) ->
-    true;
-should_retry_gun_error({stream_error, closing}) ->
-    true;
-should_retry_gun_error({stream_error, {closed, normal}}) ->
-    true;
-should_retry_gun_error({down, noproc}) ->
-    true;
-should_retry_gun_error({down, normal}) ->
-    true;
-should_retry_gun_error({down, {shutdown, closed}}) ->
-    true;
-should_retry_gun_error({down, {shutdown, {error, einval}}}) ->
-    true;
-should_retry_gun_error({shutdown, normal}) ->
-    true;
-should_retry_gun_error({shutdown, closed}) ->
-    true;
-should_retry_gun_error(noproc) ->
-    true;
-should_retry_gun_error(closed) ->
-    true;
-should_retry_gun_error(closing) ->
-    true;
-should_retry_gun_error(_) ->
-    false.
+gun_collect_body(ConnPid, StreamRef, ExpectedBytes, ReceivedBytes) ->
+    case gun:await(ConnPid, StreamRef, 10000) of
+        {data, nofin, Data} ->
+            gun_collect_body(ConnPid, StreamRef, ExpectedBytes, ReceivedBytes + byte_size(Data));
+        {data, fin, Data} ->
+            _FinalBytes = ReceivedBytes + byte_size(Data),
+            ok;
+        {trailers, _Trailers} ->
+            case body_complete(ExpectedBytes, ReceivedBytes) of
+                true -> ok;
+                false -> {error, {incomplete_body, ReceivedBytes, ExpectedBytes}}
+            end;
+        {error, {stream_error, Reason}} ->
+            case body_complete_on_close(ExpectedBytes, ReceivedBytes) of
+                true -> ok;
+                false -> {error, {stream_error, Reason, ReceivedBytes, ExpectedBytes}}
+            end;
+        {error, {connection_error, Reason}} ->
+            case body_complete_on_close(ExpectedBytes, ReceivedBytes) of
+                true -> ok;
+                false -> {error, {connection_error, Reason, ReceivedBytes, ExpectedBytes}}
+            end;
+        {error, {down, Reason}} ->
+            case body_complete_on_close(ExpectedBytes, ReceivedBytes) of
+                true -> ok;
+                false -> {error, {down, Reason, ReceivedBytes, ExpectedBytes}}
+            end;
+        {error, timeout} ->
+            {error, timeout};
+        Error ->
+            Error
+    end.
+
+expected_response_bytes(Headers) ->
+    case lists:keyfind(<<"content-length">>, 1, Headers) of
+        {_, Value} ->
+            try binary_to_integer(Value) of
+                Int -> Int
+            catch
+                _:_ -> undefined
+            end;
+        false ->
+            undefined
+    end.
+
+body_complete(undefined, _ReceivedBytes) ->
+    false;
+body_complete(ExpectedBytes, ReceivedBytes) ->
+    ReceivedBytes >= ExpectedBytes.
+
+body_complete_on_close(undefined, ReceivedBytes) ->
+    ReceivedBytes >= ?KNOWN_RESPONSE_BODY_BYTES;
+body_complete_on_close(ExpectedBytes, ReceivedBytes) ->
+    ReceivedBytes >= ExpectedBytes.

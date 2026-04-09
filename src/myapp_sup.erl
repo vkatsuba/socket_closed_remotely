@@ -11,7 +11,6 @@ init(_Args) ->
     Client = gun, % httpc | hackney | gun
     CountParallelRequests = 100,
     RequestBodyBytes = 1000000,
-    GunMaxActiveRequests = 50,
     EnableHttpcDebugTrace = true,
     TraceLimit = 1000,
     Host = "https://caddy.localhost",
@@ -25,14 +24,6 @@ init(_Args) ->
             false ->
                 []
         end,
-    GunLimiterChildSpecs =
-        case Client =:= gun of
-            true ->
-                [#{id => gun_limiter, start => {myapp_gun_limiter, start_link, [GunMaxActiveRequests]}}];
-            false ->
-                []
-        end,
-
     ChildSpecs =[#{
       id => list_to_atom("server_" ++ integer_to_list(I)), 
       start => {gen_server, start_link, [{local, list_to_atom("server_" ++ integer_to_list(I))}, myapp_server, [I, Host, Counter, Client, RequestBodyBytes], []]}
@@ -40,4 +31,4 @@ init(_Args) ->
 
     {ok, {#{}, [
       #{id => stats, start => {gen_server, start_link, [{local, stats}, myapp_stats, [Counter, Client, RequestBodyBytes], []]}}
-    | OptionalChildSpecs ++ GunLimiterChildSpecs ++ ChildSpecs]}}.
+    | OptionalChildSpecs ++ ChildSpecs]}}.
