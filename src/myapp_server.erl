@@ -62,35 +62,16 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, _State, _Extra) ->
     {error, ok}.
 
-
-
-next_chunk({<<>>, _ChunkSize}) ->
-    eof;
-next_chunk({Bin, ChunkSize}) when byte_size(Bin) =< ChunkSize ->
-    {ok, Bin, {<<>>, ChunkSize}};
-next_chunk({Bin, ChunkSize}) ->
-    <<Chunk:ChunkSize/binary, Rest/binary>> = Bin,
-    {ok, Chunk, {Rest, ChunkSize}}.
-
 request(State = #state{host = Host, client = httpc, request_body = RequestBody}) ->
     Id = base64:encode(crypto:strong_rand_bytes(50)),
-    % Result = httpc:request(post, {Host, [{"X-Request-Id", Id}], "application/x-www-form-urlencoded", RequestBody}, [{ssl, [{verify, verify_none}]}], []),
-    ChunkSize = 64 * 1024,
-    Result = httpc:request(
-        post,
-        {Host,
-         [{"X-Request-Id", Id}],
-         "application/x-www-form-urlencoded",
-         {chunkify, fun next_chunk/1, {iolist_to_binary(RequestBody), ChunkSize}}},
-        [
-            {ssl, [{verify, verify_none}]}
-        ],
-        []
-    ),
+    Req = {post,
+           Host,
+           [{"X-Request-Id", Id}],
+           "application/x-www-form-urlencoded",
+           iolist_to_binary(RequestBody)},
+    Result = myapp_httpc_limiter:request(Req, 30000),
     case Result of
-
         {ok, {{_, _Status, _}, _, _Response}} ->
-            % io:format("request ok ~p~n", [_Status]),
             {ok, State};
         Error   ->
             io:format("request error: ~p ~p~n", [Id, Error]),
@@ -109,15 +90,15 @@ request(State = #state{host = Host, client = hackney, request_body = RequestBody
                 {ok, RespBody} when byte_size(RespBody) =:= ?KNOWN_RESPONSE_BODY_BYTES ->
                     {ok, State};
                 {ok, RespBody} ->
-                    io:format("hackney body size mismatch: ~p got=~p expected=~p~n",
+                    io:format("hackney-error hackney body size mismatch: ~p got=~p expected=~p~n",
                         [Id, byte_size(RespBody), ?KNOWN_RESPONSE_BODY_BYTES]),
                     {{error, {unexpected_body_size, byte_size(RespBody)}}, State};
                  Error   ->
-                    io:format("hackney body error: ~p ~p~n", [Id, Error]),
+                    io:format("hackney-error body error: ~p ~p~n", [Id, Error]),
                     {{error, Error}, State}
             end;
         Error   ->
-            io:format("request error: ~p ~p~n", [Id, Error]),
+            io:format("hackney-error request error: ~p ~p~n", [Id, Error]),
             {{error, Error}, State}
     end;
 
