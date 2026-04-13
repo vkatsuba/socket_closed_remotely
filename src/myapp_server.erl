@@ -132,23 +132,28 @@ request(State = #state{client = gun, request_body = RequestBody}) ->
     gun_request(State, Id, Headers, Body).
 
 gun_request(State, Id, Headers, Body) ->
-    case open_gun_connection(State) of
-        {ok, ConnPid} ->
-            try
-                StreamRef = gun:post(ConnPid, State#state.gun_path, Headers, Body),
-                case gun_await_response_body(ConnPid, StreamRef) of
-                    ok ->
-                        {ok, State};
-                    Error ->
-                        io:format("gun request error: ~p ~p~n", [Id, Error]),
-                        {{error, Error}, State}
-                end
-            after
-                catch gun:close(ConnPid)
-            end;
-        {error, Error} ->
-            io:format("gun connection error: ~p ~p~n", [Id, Error]),
-            {{error, Error}, State}
+    ok = myapp_gun_limiter:acquire(),
+    try
+        case open_gun_connection(State) of
+            {ok, ConnPid} ->
+                try
+                    StreamRef = gun:post(ConnPid, State#state.gun_path, Headers, Body),
+                    case gun_await_response_body(ConnPid, StreamRef) of
+                        ok ->
+                            {ok, State};
+                        Error ->
+                            io:format("gun request error: ~p ~p~n", [Id, Error]),
+                            {{error, Error}, State}
+                    end
+                after
+                    catch gun:close(ConnPid)
+                end;
+            {error, Error} ->
+                io:format("gun connection error: ~p ~p~n", [Id, Error]),
+                {{error, Error}, State}
+        end
+    after
+        ok = myapp_gun_limiter:release()
     end.
 
 gun_destination(gun, Host) ->
@@ -171,7 +176,7 @@ open_gun_connection(#state{gun_host = GunHost, gun_port = GunPort}) ->
             {server_name_indication, GunHost}
         ],
         protocols => [http],
-        http_opts => #{version => 'HTTP/1.0'},
+        http_opts => #{version => 'HTTP/1.1'},
         retry => 0
     },
     case gun:open(GunHost, GunPort, Opts) of

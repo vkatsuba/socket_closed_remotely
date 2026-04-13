@@ -10,6 +10,7 @@ init(_Args) ->
 
     Client = gun, % httpc | hackney | gun
     CountParallelRequests = 100,
+    GunMaxActiveRequests = 40,
     RequestBodyBytes = 1000000,
     EnableHttpcDebugTrace = true,
     TraceLimit = 1000,
@@ -18,12 +19,18 @@ init(_Args) ->
     ok = myapp_request_body:init(),
 
     OptionalChildSpecs =
-        case Client =:= httpc andalso EnableHttpcDebugTrace of
+        (case Client =:= gun of
+            true ->
+                [#{id => gun_limiter, start => {myapp_gun_limiter, start_link, [GunMaxActiveRequests]}}];
+            false ->
+                []
+         end) ++
+        (case Client =:= httpc andalso EnableHttpcDebugTrace of
             true ->
                 [#{id => httpc_dbg, start => {myapp_httpc_dbg, start_link, [TraceLimit]}}];
             false ->
                 []
-        end,
+         end),
     ChildSpecs =[#{
       id => list_to_atom("server_" ++ integer_to_list(I)), 
       start => {gen_server, start_link, [{local, list_to_atom("server_" ++ integer_to_list(I))}, myapp_server, [I, Host, Counter, Client, RequestBodyBytes], []]}
