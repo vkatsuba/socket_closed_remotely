@@ -68,8 +68,8 @@ maybe_start_httpc_profiles(_, _, _, _) ->
 maybe_set_httpc_profile_options(Profile) ->
     _ = catch httpc:set_options(
         [
-            {max_sessions, 50},
-            {max_keep_alive_length, 1000},
+            {max_sessions, 30},
+            {max_keep_alive_length, 100000},
             {keep_alive_timeout, 120000}
         ],
         Profile),
@@ -91,5 +91,5 @@ maybe_warm_httpc_profile(Profile, Host, RequestBodyBytes) ->
               [],
               Profile)
       end,
-      lists:seq(1, 2)),
+      lists:seq(1, 5)),
     ok.
