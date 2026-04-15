@@ -19,6 +19,7 @@
     client,
     request_body_bytes,
     request_body,
+    logged_response_headers = false,
     gun_host = undefined,
     gun_port = undefined,
     gun_path = undefined
@@ -66,6 +67,7 @@ code_change(_OldVsn, _State, _Extra) ->
 
 request(State = #state{id = ServerId, host = Host, client = httpc, request_body = RequestBody}) ->
     Id = base64:encode(crypto:strong_rand_bytes(50)),
+    Profile = myapp_httpc_limiter:profile_for_server(ServerId),
     Req = {post,
            Host,
            [{"X-Request-Id", Id}],
@@ -73,10 +75,22 @@ request(State = #state{id = ServerId, host = Host, client = httpc, request_body 
            iolist_to_binary(RequestBody)},
     Result = myapp_httpc_limiter:request(ServerId, Req, 30000),
     case Result of
-        {ok, {{_, _Status, _}, _, _Response}} ->
-            {ok, State};
+        {ok, {{_, _Status, _}, Headers, ResponseBody}} ->
+            NextState = maybe_log_response_headers(httpc, Headers, State),
+            case response_body_size(ResponseBody) of
+                ?KNOWN_RESPONSE_BODY_BYTES ->
+                    {ok, NextState};
+                Size ->
+                    io:format("httpc-error body size mismatch: ~p got=~p expected=~p headers=~P~n",
+                        [Id, Size, ?KNOWN_RESPONSE_BODY_BYTES, Headers, 20]),
+                    myapp_error_context:log(httpc, Id, {unexpected_body_size, Size},
+                        #{server_id => ServerId, profile => Profile, headers => Headers}),
+                    {{error, {unexpected_body_size, Size}}, NextState}
+            end;
         Error   ->
             io:format("request error: ~p ~p~n", [Id, Error]),
+            myapp_error_context:log(httpc, Id, Error,
+                #{server_id => ServerId, profile => Profile}),
             {{error, Error}, State}
     end;
 
@@ -86,21 +100,26 @@ request(State = #state{host = Host, client = hackney, request_body = RequestBody
     Result = hackney:request(post, Host, [{"X-Request-Id", Id}], RequestBody, [{ssl_options, [{verify, verify_none}]}, {connect_timeout, 5000}]),
     case Result of
 
-        {ok, _StatusCode, _RespHeaders, ClientRef} ->
+        {ok, _StatusCode, RespHeaders, ClientRef} ->
            
             case hackney:body(ClientRef) of
                 {ok, RespBody} when byte_size(RespBody) =:= ?KNOWN_RESPONSE_BODY_BYTES ->
-                    {ok, State};
+                    {ok, maybe_log_response_headers(hackney, RespHeaders, State)};
                 {ok, RespBody} ->
                     io:format("hackney-error hackney body size mismatch: ~p got=~p expected=~p~n",
                         [Id, byte_size(RespBody), ?KNOWN_RESPONSE_BODY_BYTES]),
+                    myapp_error_context:log(hackney, Id, {unexpected_body_size, byte_size(RespBody)},
+                        #{server_id => State#state.id, headers => RespHeaders}),
                     {{error, {unexpected_body_size, byte_size(RespBody)}}, State};
                  Error   ->
                     io:format("hackney-error body error: ~p ~p~n", [Id, Error]),
+                    myapp_error_context:log(hackney, Id, Error,
+                        #{server_id => State#state.id, headers => RespHeaders}),
                     {{error, Error}, State}
             end;
         Error   ->
             io:format("hackney-error request error: ~p ~p~n", [Id, Error]),
+            myapp_error_context:log(hackney, Id, Error, #{server_id => State#state.id}),
             {{error, Error}, State}
     end;
 
@@ -126,6 +145,7 @@ gun_request(State, Id, Headers, Body) ->
                             {ok, State};
                         Error ->
                             io:format("gun request error: ~p ~p~n", [Id, Error]),
+                            myapp_error_context:log(gun, Id, Error, #{server_id => State#state.id}),
                             {{error, Error}, State}
                     end
                 after
@@ -133,6 +153,7 @@ gun_request(State, Id, Headers, Body) ->
                 end;
             {error, Error} ->
                 io:format("gun connection error: ~p ~p~n", [Id, Error]),
+                myapp_error_context:log(gun, Id, Error, #{server_id => State#state.id}),
                 {{error, Error}, State}
         end
     after
@@ -240,3 +261,16 @@ body_complete_on_close(undefined, ReceivedBytes) ->
     ReceivedBytes >= ?KNOWN_RESPONSE_BODY_BYTES;
 body_complete_on_close(ExpectedBytes, ReceivedBytes) ->
     ReceivedBytes >= ExpectedBytes.
+
+response_body_size(Body) when is_binary(Body) ->
+    byte_size(Body);
+response_body_size(Body) ->
+    iolist_size(Body).
+
+maybe_log_response_headers(_Client, _Headers, State = #state{logged_response_headers = true}) ->
+    State;
+maybe_log_response_headers(Client, Headers, State = #state{id = 1, logged_response_headers = false}) ->
+    io:format("~p response headers sample: ~P~n", [Client, Headers, 20]),
+    State#state{logged_response_headers = true};
+maybe_log_response_headers(_Client, _Headers, State) ->
+    State.

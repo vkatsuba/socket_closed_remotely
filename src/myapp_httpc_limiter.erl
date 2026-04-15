@@ -1,7 +1,7 @@
 -module(myapp_httpc_limiter).
 -behaviour(gen_server).
 
--export([start_link/2, request/3, stats/0]).
+-export([start_link/2, request/3, stats/0, profile_for_server/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {
@@ -20,6 +20,9 @@ request(ServerId, Req, Timeout) ->
 
 stats() ->
     gen_server:call(?MODULE, stats).
+
+profile_for_server(ServerId) ->
+    gen_server:call(?MODULE, {profile_for_server, ServerId}).
 
 init([Profiles, LimitPerProfile]) ->
     Inflight = maps:from_list([{P, 0} || P <- Profiles]),
@@ -42,6 +45,8 @@ handle_call({request, ServerId, Req}, From, State0) ->
             Queues1 = maps:put(Profile, Queue1, State0#state.queues),
             {noreply, State0#state{queues = Queues1}}
     end;
+handle_call({profile_for_server, ServerId}, _From, State = #state{profiles = Profiles}) ->
+    {reply, choose_profile(ServerId, Profiles), State};
 handle_call(stats, _From, State = #state{profiles = Profiles, limit_per_profile = Limit, inflight = Inflight, queues = Queues}) ->
     ProfileStats =
         [#{profile => Profile,
@@ -106,6 +111,6 @@ do_httpc_request(Profile, {post, Url, Headers, ContentType, Body}) ->
         post,
         {Url, Headers, ContentType, Body},
         [{ssl, [{verify, verify_none}]}],
-        [],
+        [{body_format, binary}],
         Profile
     ).
