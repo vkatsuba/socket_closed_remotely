@@ -1,43 +1,70 @@
 -module(myapp_httpc_limiter).
 -behaviour(gen_server).
 
--export([start_link/2, request/2]).
+-export([start_link/2, request/3, stats/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {
-    profile,
-    limit = 20,
-    in_flight = 0,
-    queue = queue:new(),
+    profiles = [],
+    limit_per_profile = 5,
+    inflight = #{},
+    queues = #{},
     requests = #{}
 }).
 
-start_link(Profile, Limit) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [Profile, Limit], []).
+start_link(Profiles, LimitPerProfile) ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [Profiles, LimitPerProfile], []).
 
-request(Req, Timeout) ->
-    gen_server:call(?MODULE, {request, Req}, Timeout).
+request(ServerId, Req, Timeout) ->
+    gen_server:call(?MODULE, {request, ServerId, Req}, Timeout).
 
-init([Profile, Limit]) ->
-    {ok, #state{profile = Profile, limit = Limit}}.
+stats() ->
+    gen_server:call(?MODULE, stats).
 
-handle_call({request, Req}, From, State = #state{in_flight = InFlight, limit = Limit})
-  when InFlight < Limit ->
-    {noreply, start_request(Req, From, State)};
-handle_call({request, Req}, From, State = #state{queue = Queue0}) ->
-    {noreply, State#state{queue = queue:in({From, Req}, Queue0)}}.
+init([Profiles, LimitPerProfile]) ->
+    Inflight = maps:from_list([{P, 0} || P <- Profiles]),
+    Queues = maps:from_list([{P, queue:new()} || P <- Profiles]),
+    {ok, #state{
+        profiles = Profiles,
+        limit_per_profile = LimitPerProfile,
+        inflight = Inflight,
+        queues = Queues
+    }}.
+
+handle_call({request, ServerId, Req}, From, State0) ->
+    Profile = choose_profile(ServerId, State0#state.profiles),
+    case maps:get(Profile, State0#state.inflight) < State0#state.limit_per_profile of
+        true ->
+            {noreply, start_request(Profile, Req, From, State0)};
+        false ->
+            Queue0 = maps:get(Profile, State0#state.queues),
+            Queue1 = queue:in({From, Req}, Queue0),
+            Queues1 = maps:put(Profile, Queue1, State0#state.queues),
+            {noreply, State0#state{queues = Queues1}}
+    end;
+handle_call(stats, _From, State = #state{profiles = Profiles, limit_per_profile = Limit, inflight = Inflight, queues = Queues}) ->
+    ProfileStats =
+        [#{profile => Profile,
+           in_flight => maps:get(Profile, Inflight),
+           queue_len => queue:len(maps:get(Profile, Queues)),
+           limit => Limit}
+         || Profile <- Profiles],
+    {reply, #{profiles => ProfileStats, total_limit => length(Profiles) * Limit}, State}.
 
 handle_cast(_, State) ->
     {noreply, State}.
 
-handle_info({request_done, Ref, Result}, State0 = #state{requests = Requests, in_flight = InFlight}) ->
-    From = maps:get(Ref, Requests),
+handle_info({request_done, Ref, Profile, Result}, State0) ->
+    From = maps:get(Ref, State0#state.requests),
     gen_server:reply(From, Result),
+    Requests1 = maps:remove(Ref, State0#state.requests),
+    Inflight0 = maps:get(Profile, State0#state.inflight),
+    Inflight1 = maps:put(Profile, Inflight0 - 1, State0#state.inflight),
     State1 = State0#state{
-        requests = maps:remove(Ref, Requests),
-        in_flight = InFlight - 1
+        requests = Requests1,
+        inflight = Inflight1
     },
-    {noreply, maybe_start_next(State1)};
+    {noreply, maybe_start_next(Profile, State1)};
 handle_info(_, State) ->
     {noreply, State}.
 
@@ -47,27 +74,32 @@ terminate(_, _) ->
 code_change(_, State, _) ->
     {ok, State}.
 
-start_request(Req, From, State0 = #state{profile = Profile, in_flight = InFlight, requests = Requests}) ->
+choose_profile(ServerId, Profiles) ->
+    N = length(Profiles),
+    lists:nth(((ServerId - 1) rem N) + 1, Profiles).
+
+start_request(Profile, Req, From, State0) ->
     Ref = make_ref(),
     Parent = self(),
     spawn(fun() ->
         Result = do_httpc_request(Profile, Req),
-        Parent ! {request_done, Ref, Result}
+        Parent ! {request_done, Ref, Profile, Result}
     end),
+    Inflight0 = maps:get(Profile, State0#state.inflight),
     State0#state{
-        in_flight = InFlight + 1,
-        requests = maps:put(Ref, From, Requests)
+        inflight = maps:put(Profile, Inflight0 + 1, State0#state.inflight),
+        requests = maps:put(Ref, From, State0#state.requests)
     }.
 
-maybe_start_next(State0 = #state{in_flight = InFlight, limit = Limit, queue = Queue0}) when InFlight < Limit ->
+maybe_start_next(Profile, State0) ->
+    Queue0 = maps:get(Profile, State0#state.queues),
     case queue:out(Queue0) of
         {{value, {From, Req}}, Queue1} ->
-            start_request(Req, From, State0#state{queue = Queue1});
+            Queues1 = maps:put(Profile, Queue1, State0#state.queues),
+            start_request(Profile, Req, From, State0#state{queues = Queues1});
         {empty, _} ->
             State0
-    end;
-maybe_start_next(State) ->
-    State.
+    end.
 
 do_httpc_request(Profile, {post, Url, Headers, ContentType, Body}) ->
     httpc:request(

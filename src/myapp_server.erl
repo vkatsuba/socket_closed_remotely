@@ -13,6 +13,7 @@
 ]).
 
 -record(state, {
+    id,
     host,
     counter,
     client,
@@ -29,6 +30,7 @@ init([I, Host, Counter, Client, RequestBodyBytes]) ->
     io:format("server ~p started~n", [I]),
     {GunHost, GunPort, GunPath} = gun_destination(Client, Host),
     {ok, #state{
+        id = I,
         host = Host,
         counter = Counter,
         client = Client,
@@ -62,14 +64,14 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, _State, _Extra) ->
     {error, ok}.
 
-request(State = #state{host = Host, client = httpc, request_body = RequestBody}) ->
+request(State = #state{id = ServerId, host = Host, client = httpc, request_body = RequestBody}) ->
     Id = base64:encode(crypto:strong_rand_bytes(50)),
     Req = {post,
            Host,
            [{"X-Request-Id", Id}],
            "application/x-www-form-urlencoded",
            iolist_to_binary(RequestBody)},
-    Result = myapp_httpc_limiter:request(Req, 30000),
+    Result = myapp_httpc_limiter:request(ServerId, Req, 30000),
     case Result of
         {ok, {{_, _Status, _}, _, _Response}} ->
             {ok, State};

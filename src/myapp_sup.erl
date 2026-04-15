@@ -11,15 +11,15 @@ init(_Args) ->
     Client = httpc, % httpc | hackney | gun
     CountParallelRequests = 100,
     GunMaxActiveRequests = 50,
-    HttpcProfile = myapp_httpc_profile,
-    HttpcMaxActiveRequests = 50,
+    HttpcProfiles = [profile_1, profile_2, profile_3, profile_4, profile_5],
+    HttpcLimitPerProfile = 50,
     RequestBodyBytes = 1000000,
     EnableHttpcDebugTrace = false,
     TraceLimit = 1000,
     Host = "https://caddy.localhost",
     Counter = counters:new(2, []),
     ok = myapp_request_body:init(),
-    ok = maybe_start_httpc_profile(Client, HttpcProfile),
+    ok = maybe_start_httpc_profiles(Client, HttpcProfiles),
 
     OptionalChildSpecs =
         (case Client =:= gun of
@@ -30,7 +30,7 @@ init(_Args) ->
          end) ++
         (case Client =:= httpc of
             true ->
-                [#{id => httpc_limiter, start => {myapp_httpc_limiter, start_link, [HttpcProfile, HttpcMaxActiveRequests]}}];
+                [#{id => httpc_limiter, start => {myapp_httpc_limiter, start_link, [HttpcProfiles, HttpcLimitPerProfile]}}];
             false ->
                 []
          end) ++
@@ -49,11 +49,16 @@ init(_Args) ->
       #{id => stats, start => {gen_server, start_link, [{local, stats}, myapp_stats, [Counter, Client, RequestBodyBytes], []]}}
     | OptionalChildSpecs ++ ChildSpecs]}}.
 
-maybe_start_httpc_profile(httpc, Profile) ->
-    case inets:start(httpc, [{profile, Profile}]) of
-        {ok, _Pid} -> ok;
-        {error, {already_started, _Pid}} -> ok;
-        ok -> ok
-    end;
-maybe_start_httpc_profile(_, _) ->
+maybe_start_httpc_profiles(httpc, Profiles) ->
+    lists:foreach(
+      fun(Profile) ->
+          case inets:start(httpc, [{profile, Profile}]) of
+              {ok, _Pid} -> ok;
+              {error, {already_started, _Pid}} -> ok;
+              ok -> ok
+          end
+      end,
+      Profiles),
+    ok;
+maybe_start_httpc_profiles(_, _) ->
     ok.
